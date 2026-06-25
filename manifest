@@ -1,0 +1,10 @@
+appname               = yuexps-usb-fan
+version               = 1.0.0
+display_name          = USB Fan
+desc                  = USB继电器-散热风扇控制
+platform              = x86
+source                = thirdparty
+maintainer            = yuexps
+distributor           = yuexps
+desktop_uidir         = ui
+desktop_applaunchname = yuexps-usb-fan.Application

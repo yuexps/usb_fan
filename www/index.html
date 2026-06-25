@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能 USB 风扇温控系统</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="app-container">
+        <main class="dashboard-grid">
+            <!-- 左侧：实时状态与仪表盘 -->
+            <section class="card status-card">
+                <div class="card-header">
+                    <h2>实时状态监测</h2>
+                    <span id="connection-badge" class="badge badge-online">连接正常</span>
+                </div>
+
+                <div class="temp-gauge-container">
+                    <!-- 温度圆环仪表盘 -->
+                    <div class="gauge-wrapper">
+                        <svg class="gauge-svg" viewBox="0 0 120 120">
+                            <circle class="gauge-bg" cx="60" cy="60" r="50"></circle>
+                            <circle id="gauge-fill" class="gauge-fill" cx="60" cy="60" r="50"></circle>
+                        </svg>
+                        <div class="gauge-info">
+                            <span id="temp-display" class="temp-val">--</span>
+                            <span class="temp-unit">℃</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="info-list">
+                    <div class="info-item">
+                        <span class="info-label">继电器状态</span>
+                        <span id="relay-status" class="info-value text-unknown">加载中...</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">当前运行模式</span>
+                        <span id="mode-status" class="info-value text-unknown">加载中...</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 右侧：控制中心 -->
+            <div class="control-column">
+                <!-- 运行模式与温控参数 -->
+                <section class="card config-card">
+                    <h2>运行模式与温控参数</h2>
+                    <div class="mode-selector">
+                        <button id="btn-mode-auto" class="btn-mode">自动温控</button>
+                        <button id="btn-mode-manual" class="btn-mode">手动控制</button>
+                    </div>
+
+                    <div class="config-form" style="margin-top: 20px;">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="input-ceiling">温度上限 (℃)</label>
+                                <input type="number" id="input-ceiling" step="0.1" min="0" max="100"
+                                    placeholder="如 55.0" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="input-floor">温度下限 (℃)</label>
+                                <input type="number" id="input-floor" step="0.1" min="0" max="100" placeholder="如 50.0"
+                                    required>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 手动开关控制 -->
+                <section class="card manual-card" id="manual-control-section">
+                    <h2>手动继电器控制</h2>
+                    <div class="control-btn-group">
+                        <button id="btn-fan-open" class="btn btn-open">开启风扇</button>
+                        <button id="btn-fan-close" class="btn btn-close">关闭风扇</button>
+                    </div>
+                    <button id="btn-fan-query" class="btn btn-query">
+                        <span class="btn-text">手动查询硬件状态</span>
+                        <span class="spinner" id="query-spinner"></span>
+                    </button>
+                </section>
+            </div>
+        </main>
+
+        <!-- 悬浮通知弹窗 (Toast) -->
+        <div id="toast-container" class="toast-container"></div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>

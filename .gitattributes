@@ -1,0 +1,14 @@
+# 默认所有文本文件都指定使用 LF 换行符
+* text eol=lf
+
+# Windows 批处理脚本强制使用 CRLF 换行符
+build.cmd text eol=crlf
+
+# 声明二进制文件，防止 Git 尝试进行换行符转换
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.exe binary
+*.fpk binary
+usb_fan binary

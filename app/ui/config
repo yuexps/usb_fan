@@ -1,0 +1,20 @@
+{
+    ".url": {
+        "yuexps-usb-fan.Application": {
+            "title": "USB Fan",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "http",
+            "gatewaySocket": "usb_fan.sock",
+            "gatewayPrefix": "/app/yuexps-usb-fan",
+            "url": "/app/yuexps-usb-fan/",
+            "allUsers": false,
+            "noDisplay": false,
+            "control": {
+                "accessPerm": "readonly",
+                "portPerm": "readonly",
+                "pathPerm": "readonly"
+            }
+        }
+    }
+}
