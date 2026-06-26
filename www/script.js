@@ -272,7 +272,7 @@ async function setMode(mode) {
 // 手动开关继电器
 async function controlFan(state) {
     const url = state ? 'api/open' : 'api/close';
-    const actionName = state ? '开启风扇' : '关闭风扇';
+    const actionName = state ? '开启继电器' : '关闭继电器';
     try {
         const response = await fetch(url, { method: 'POST' });
         const res = await response.json();

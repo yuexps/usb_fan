@@ -1,9 +1,9 @@
-# 智能 USB 风扇温控系统 (yuexps-usb-fan)
+# USB 继电器温控系统 (yuexps-usb-fan)
 
-飞牛 NAS (FNOS) 的 USB 继电器风扇温控应用。
+飞牛 NAS (FNOS) 的 USB 继电器 温控程序。
 
 ### 自定义配置说明
-应用运行后，会在持久化目录（FNOS 环境为 `/var/apps/yuexps-usb-fan/config.json`，本地运行为同级 `config.json`）生成配置文件。你可以直接编辑该 JSON 文件来自定义参数（修改保存后，重启应用服务即可生效）：
+应用运行后，会在持久化目录（FNOS 环境为 `/var/apps/yuexps-usb-fan/var/config.json`，本地运行为同级 `config.json`）生成配置文件。你可以直接编辑该 JSON 文件来自定义参数（修改保存后，重启应用服务即可生效）：
 
 | 参数名 | 默认值 | 作用说明 |
 | :--- | :--- | :--- |

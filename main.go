@@ -178,7 +178,7 @@ func initSerial() bool {
 	return true
 }
 
-// 带反馈开关风扇
+// 带反馈开关继电器
 func setFan(state bool) bool {
 	var s *serial.Port
 	serialMu.Lock()
@@ -539,15 +539,15 @@ func autoTempLoop() {
 					if t >= ceiling+5.0 && tAvg < ceiling {
 						reason = fmt.Sprintf("瞬时温度 %.2f℃ 触发紧急上限 (%.2f℃+5℃)", t, ceiling)
 					}
-					writeLog(reason + "，自动开启风扇继电器")
+					writeLog(reason + "，自动开启继电器")
 					_ = setFan(true)
 				} else if tAvg <= floor && state {
 					elapsed := time.Since(onTime)
 					if elapsed >= time.Duration(minRun)*time.Second {
-						writeLog(fmt.Sprintf("平均温度 %.2f℃ 低于下限 %.2f℃，且风扇已运行 %.1f 秒，自动关闭风扇继电器", tAvg, floor, elapsed.Seconds()))
+						writeLog(fmt.Sprintf("平均温度 %.2f℃ 低于下限 %.2f℃，且已运行 %.1f 秒，自动关闭继电器", tAvg, floor, elapsed.Seconds()))
 						_ = setFan(false)
 					} else {
-						writeLog(fmt.Sprintf("平均温度 %.2f℃ 已低于下限 %.2f℃，因未达到最小运行时间（%d 秒，已运行 %.1f 秒）保持风扇开启", tAvg, floor, minRun, elapsed.Seconds()))
+						writeLog(fmt.Sprintf("平均温度 %.2f℃ 已低于下限 %.2f℃，因未达到最小运行时间（%d 秒，已运行 %.1f 秒）保持开启", tAvg, floor, minRun, elapsed.Seconds()))
 					}
 				}
 			}
