@@ -1,5 +1,5 @@
 appname               = yuexps-usb-fan
-version               = 1.0.0
+version               = 1.0.1
 display_name          = USB Fan
 desc                  = USB继电器-散热风扇控制
 platform              = x86

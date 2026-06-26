@@ -14,15 +14,55 @@ const btnFanClose = document.getElementById('btn-fan-close');
 const btnFanQuery = document.getElementById('btn-fan-query');
 const querySpinner = document.getElementById('query-spinner');
 
-const inputCeiling = document.getElementById('input-ceiling');
-const inputFloor = document.getElementById('input-floor');
+// 新增配置弹窗相关元素
+const btnOpenConfig = document.getElementById('btn-open-config');
+const configModal = document.getElementById('config-modal');
+const btnCloseModal = document.getElementById('btn-close-modal');
+const btnCancelConfig = document.getElementById('btn-cancel-config');
+const btnSaveConfig = document.getElementById('btn-save-config');
+const formSystemConfig = document.getElementById('form-system-config');
+
+const modalInputCeiling = document.getElementById('modal-input-ceiling');
+const modalInputFloor = document.getElementById('modal-input-floor');
+const modalInputMinRun = document.getElementById('modal-input-min-run');
+const modalInputFilterWindow = document.getElementById('modal-input-filter-window');
+const modalInputPollInterval = document.getElementById('modal-input-poll-interval');
+const modalInputSerialPort = document.getElementById('modal-input-serial-port');
+const modalInputBaudRate = document.getElementById('modal-input-baud-rate');
+const modalInputTempPath = document.getElementById('modal-input-temp-path');
+const modalInputHasFeedback = document.getElementById('modal-input-has-feedback');
+
+// 继电器指令及状态绑定
+const modalInputOpOpenNoFeed = document.getElementById('modal-input-op-open-nofeed');
+const modalInputOpCloseNoFeed = document.getElementById('modal-input-op-close-nofeed');
+const modalInputOpOpenFeed = document.getElementById('modal-input-op-open-feed');
+const modalInputOpCloseFeed = document.getElementById('modal-input-op-close-feed');
+const modalInputOpToggleFeed = document.getElementById('modal-input-op-toggle-feed');
+const modalInputOpQuery = document.getElementById('modal-input-op-query');
+const modalInputStatusOn = document.getElementById('modal-input-status-on');
+const modalInputStatusOff = document.getElementById('modal-input-status-off');
 
 const toastContainer = document.getElementById('toast-container');
 
-// 全局变量保存后端配置，以防与用户输入焦点冲突
+// 缓存配置状态
 let currentConfig = {
     ceiling: null,
-    floor: null
+    floor: null,
+    min_run_time: null,
+    filter_window: null,
+    poll_interval: null,
+    serial_port: null,
+    baud_rate: null,
+    temp_path: null,
+    has_feedback: null,
+    op_close_nofeed: null,
+    op_open_nofeed: null,
+    op_close_feed: null,
+    op_open_feed: null,
+    op_toggle_feed: null,
+    op_query: null,
+    status_on: null,
+    status_off: null
 };
 
 // ====================== Toast 消息弹窗 ======================
@@ -30,7 +70,6 @@ function showToast(message, type = 'info') {
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
     
-    // 清除 emoji 标志，改用纯文本前缀
     let prefix = '[提示]';
     if (type === 'success') prefix = '[成功]';
     if (type === 'error') prefix = '[错误]';
@@ -38,7 +77,6 @@ function showToast(message, type = 'info') {
     toast.innerHTML = `<span>${prefix}</span> <span>${message}</span>`;
     toastContainer.appendChild(toast);
     
-    // 3秒后淡出并移除
     setTimeout(() => {
         toast.style.animation = 'toast-out 0.3s forwards cubic-bezier(0.18, 0.89, 0.32, 1.28)';
         toast.addEventListener('animationend', () => {
@@ -49,8 +87,8 @@ function showToast(message, type = 'info') {
 
 // ====================== 仪表盘环形渲染 ======================
 function updateGauge(temp) {
-    const maxTemp = 100; // 最大刻度 100℃
-    const perimeter = 2 * Math.PI * 50; // 圆环周长: 314.15926...
+    const maxTemp = 100;
+    const perimeter = 2 * Math.PI * 50;
     
     if (temp === null || isNaN(temp)) {
         tempDisplay.textContent = '--';
@@ -59,21 +97,33 @@ function updateGauge(temp) {
         return;
     }
     
-    // 显示温度值
     tempDisplay.textContent = temp.toFixed(1);
     
-    // 限制温度在 0 - 100 之间做百分比显示
     const percent = Math.min(Math.max(temp / maxTemp, 0), 1);
     const offset = perimeter * (1 - percent);
     gaugeFill.style.strokeDashoffset = offset;
     
-    // 根据温度范围切换仪表盘颜色
     if (temp < 50) {
         gaugeFill.style.stroke = 'var(--color-cool)';
     } else if (temp < 65) {
         gaugeFill.style.stroke = 'var(--color-warm)';
     } else {
         gaugeFill.style.stroke = 'var(--color-hot)';
+    }
+}
+
+// ====================== 动态条件显示 ======================
+function toggleFeedbackUI() {
+    const hasFeedback = modalInputHasFeedback.checked;
+    const feedGroup = document.getElementById('feed-group');
+    const nofeedGroup = document.getElementById('nofeed-group');
+    
+    if (hasFeedback) {
+        feedGroup.classList.remove('config-group-hidden');
+        nofeedGroup.classList.add('config-group-hidden');
+    } else {
+        feedGroup.classList.add('config-group-hidden');
+        nofeedGroup.classList.remove('config-group-hidden');
     }
 }
 
@@ -106,7 +156,6 @@ function updateUI(data) {
         btnModeAuto.className = 'btn-mode active-auto';
         btnModeManual.className = 'btn-mode';
         
-        // 自动温控下锁定手动操作
         manualControlSection.classList.add('card-disabled-overlay');
         btnFanOpen.disabled = true;
         btnFanClose.disabled = true;
@@ -118,24 +167,61 @@ function updateUI(data) {
         btnModeAuto.className = 'btn-mode';
         btnModeManual.className = 'btn-mode active-manual';
         
-        // 手动模式下解锁手动操作
         manualControlSection.classList.remove('card-disabled-overlay');
         btnFanOpen.disabled = false;
         btnFanClose.disabled = false;
         btnFanQuery.disabled = false;
     }
     
-    // 5. 更新配置阈值输入框（未被编辑/Focus时才更新）
-    currentConfig.ceiling = data.ceiling;
-    currentConfig.floor = data.floor;
+    // 5. 保存后端配置状态
+    currentConfig = {
+        ceiling: data.ceiling,
+        floor: data.floor,
+        min_run_time: data.min_run_time,
+        filter_window: data.filter_window,
+        poll_interval: data.poll_interval,
+        serial_port: data.serial_port,
+        baud_rate: data.baud_rate,
+        temp_path: data.temp_path,
+        has_feedback: data.has_feedback,
+        op_close_nofeed: data.op_close_nofeed,
+        op_open_nofeed: data.op_open_nofeed,
+        op_close_feed: data.op_close_feed,
+        op_open_feed: data.op_open_feed,
+        op_toggle_feed: data.op_toggle_feed,
+        op_query: data.op_query,
+        status_on: data.status_on,
+        status_off: data.status_off
+    };
     
-    if (document.activeElement !== inputCeiling) {
-        inputCeiling.value = data.ceiling;
+    // 弹窗未激活时回填配置
+    if (!configModal.classList.contains('active')) {
+        fillConfigForm();
+        toggleFeedbackUI();
     }
-    if (document.activeElement !== inputFloor) {
-        inputFloor.value = data.floor;
-    }
+}
 
+// 回填配置表单
+function fillConfigForm() {
+    modalInputCeiling.value = currentConfig.ceiling ?? '';
+    modalInputFloor.value = currentConfig.floor ?? '';
+    modalInputMinRun.value = currentConfig.min_run_time ?? '';
+    modalInputFilterWindow.value = currentConfig.filter_window ?? '';
+    modalInputPollInterval.value = currentConfig.poll_interval ?? '';
+    modalInputSerialPort.value = currentConfig.serial_port ?? '';
+    modalInputBaudRate.value = currentConfig.baud_rate ?? '';
+    modalInputTempPath.value = currentConfig.temp_path ?? '';
+    modalInputHasFeedback.checked = !!currentConfig.has_feedback;
+    
+    // 回填操作码
+    modalInputOpOpenNoFeed.value = currentConfig.op_open_nofeed ?? '';
+    modalInputOpCloseNoFeed.value = currentConfig.op_close_nofeed ?? '';
+    modalInputOpOpenFeed.value = currentConfig.op_open_feed ?? '';
+    modalInputOpCloseFeed.value = currentConfig.op_close_feed ?? '';
+    modalInputOpToggleFeed.value = currentConfig.op_toggle_feed ?? '';
+    modalInputOpQuery.value = currentConfig.op_query ?? '';
+    modalInputStatusOn.value = currentConfig.status_on ?? '';
+    modalInputStatusOff.value = currentConfig.status_off ?? '';
 }
 
 // 离线 UI 渲染
@@ -223,50 +309,134 @@ async function queryHardwareState() {
     }
 }
 
-// 自动保存温控配置
-async function autoSaveConfig() {
-    const ceiling = parseFloat(inputCeiling.value);
-    const floor = parseFloat(inputFloor.value);
+// ====================== 保存配置 ======================
+async function saveConfig() {
+    const ceiling = parseFloat(modalInputCeiling.value);
+    const floor = parseFloat(modalInputFloor.value);
+    const min_run_time = parseInt(modalInputMinRun.value);
+    const filter_window = parseInt(modalInputFilterWindow.value);
+    const poll_interval = parseInt(modalInputPollInterval.value);
+    const serial_port = modalInputSerialPort.value.trim();
+    const baud_rate = parseInt(modalInputBaudRate.value);
+    const temp_path = modalInputTempPath.value.trim();
+    const has_feedback = modalInputHasFeedback.checked;
     
-    if (isNaN(ceiling) || isNaN(floor)) {
-        showToast("请输入合法的温度数值", 'error');
-        inputCeiling.value = currentConfig.ceiling;
-        inputFloor.value = currentConfig.floor;
+    // 基础校验
+    if (isNaN(ceiling) || isNaN(floor) || isNaN(min_run_time) || isNaN(filter_window) ||
+        isNaN(poll_interval) || isNaN(baud_rate) || !serial_port) {
+        showToast("请填写完整的参数配置", 'error');
         return;
     }
     
     if (ceiling <= floor) {
         showToast("温度上限必须大于温度下限", 'error');
-        inputCeiling.value = currentConfig.ceiling;
-        inputFloor.value = currentConfig.floor;
         return;
     }
-    
-    // 如果值没有改变，避免多余请求
-    if (ceiling === currentConfig.ceiling && floor === currentConfig.floor) {
+
+    if (min_run_time < 5) {
+        showToast("最少运行时间必须大于等于 5 秒", 'error');
         return;
+    }
+
+    if (filter_window < 1 || filter_window > 10) {
+        showToast("平滑窗口大小必须在 1 至 10 之间", 'error');
+        return;
+    }
+
+    if (poll_interval < 1 || poll_interval > 60) {
+        showToast("采集间隔必须在 1 至 60 秒之间", 'error');
+        return;
+    }
+
+    // 提取协议参数，未启用项使用缓存数据填充
+    let op_open_nofeed = "";
+    let op_close_nofeed = "";
+    let op_open_feed = "";
+    let op_close_feed = "";
+    let op_toggle_feed = "";
+    let op_query = "";
+    let status_on = "";
+    let status_off = "";
+
+    if (has_feedback) {
+        op_open_feed = modalInputOpOpenFeed.value.trim();
+        op_close_feed = modalInputOpCloseFeed.value.trim();
+        op_toggle_feed = modalInputOpToggleFeed.value.trim();
+        op_query = modalInputOpQuery.value.trim();
+        status_on = modalInputStatusOn.value.trim();
+        status_off = modalInputStatusOff.value.trim();
+
+        // 填充无反馈默认值
+        op_open_nofeed = currentConfig.op_open_nofeed ?? "";
+        op_close_nofeed = currentConfig.op_close_nofeed ?? "";
+
+        if (!op_open_feed || !op_close_feed || !op_toggle_feed || !op_query || !status_on || !status_off) {
+            showToast("请填写完整的有反馈继电器控制指令", 'error');
+            return;
+        }
+    } else {
+        op_open_nofeed = modalInputOpOpenNoFeed.value.trim();
+        op_close_nofeed = modalInputOpCloseNoFeed.value.trim();
+
+        // 填充有反馈默认值
+        op_open_feed = currentConfig.op_open_feed ?? "";
+        op_close_feed = currentConfig.op_close_feed ?? "";
+        op_toggle_feed = currentConfig.op_toggle_feed ?? "";
+        op_query = currentConfig.op_query ?? "";
+        status_on = currentConfig.status_on ?? "";
+        status_off = currentConfig.status_off ?? "";
+
+        if (!op_open_nofeed || !op_close_nofeed) {
+            showToast("请填写完整的无反馈继电器控制指令", 'error');
+            return;
+        }
     }
     
     try {
         const response = await fetch('api/set_config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ceiling, floor })
+            body: JSON.stringify({
+                ceiling,
+                floor,
+                min_run_time,
+                filter_window,
+                poll_interval,
+                serial_port,
+                baud_rate,
+                temp_path,
+                has_feedback,
+                op_open_nofeed,
+                op_close_nofeed,
+                op_open_feed,
+                op_close_feed,
+                op_toggle_feed,
+                op_query,
+                status_on,
+                status_off
+            })
         });
         const res = await response.json();
         if (res.success) {
-            showToast("配置已自动保存并应用", 'success');
+            showToast("系统配置保存并应用成功", 'success');
+            closeModal();
             fetchStatus();
         } else {
             showToast(res.message, 'error');
-            inputCeiling.value = currentConfig.ceiling;
-            inputFloor.value = currentConfig.floor;
         }
     } catch (err) {
-        showToast("自动保存配置失败，请重试", 'error');
-        inputCeiling.value = currentConfig.ceiling;
-        inputFloor.value = currentConfig.floor;
+        showToast("保存配置请求失败，请检查网络", 'error');
     }
+}
+
+function openModal() {
+    fillConfigForm();
+    toggleFeedbackUI();
+    configModal.classList.add('active');
+}
+
+function closeModal() {
+    configModal.classList.remove('active');
 }
 
 // ====================== 事件绑定与生命周期 ======================
@@ -285,6 +455,17 @@ document.addEventListener('DOMContentLoaded', () => {
     btnFanClose.addEventListener('click', () => controlFan(false));
     btnFanQuery.addEventListener('click', queryHardwareState);
     
-    inputCeiling.addEventListener('change', autoSaveConfig);
-    inputFloor.addEventListener('change', autoSaveConfig);
+    // 弹窗相关事件监听
+    btnOpenConfig.addEventListener('click', openModal);
+    btnCloseModal.addEventListener('click', closeModal);
+    btnCancelConfig.addEventListener('click', closeModal);
+    btnSaveConfig.addEventListener('click', saveConfig);
+    
+    // 滑块变化联动事件
+    modalInputHasFeedback.addEventListener('change', toggleFeedbackUI);
+
+    // 点击遮罩外部关闭弹窗
+    configModal.addEventListener('click', (e) => {
+        if (e.target === configModal) closeModal();
+    });
 });
