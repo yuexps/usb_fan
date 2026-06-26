@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -20,14 +21,14 @@ import (
 	"github.com/tarm/serial"
 )
 
-// 配置
 var (
-	serialPort       = "/dev/ttyUSB0"
+	serialPort       = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
 	baudRate         = 9600
 	thresholdCeiling = 55.0
 	thresholdFloor   = 50.0
 	pollInterval     = 3
-	customTempPath   = "/sys/class/thermal/thermal_zone1/temp"
+	customTempPath   = "hwmon:coretemp:temp1_input"
+	activeTempPath   = ""
 	hasFeedback      = true
 	minRunTime       = 30
 	filterWindow     = 3
@@ -94,29 +95,8 @@ func toHexBytesStr(b []byte) string {
 	return strings.Join(parts, "")
 }
 
-func bytesContains(a, b []byte) bool {
-	if len(b) == 0 {
-		return false
-	}
-	if len(a) < len(b) {
-		return false
-	}
-	for i := 0; i <= len(a)-len(b); i++ {
-		match := true
-		for j := 0; j < len(b); j++ {
-			if a[i+j] != b[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
-}
 
-// 全局状态
+
 var (
 	ser              *serial.Port
 	fanState         bool
@@ -126,13 +106,20 @@ var (
 	tempHistory      []float64
 	mu               sync.Mutex
 	serialMu         sync.Mutex
+	activeHwName     string
+	activeHwType     string
+
+	isConnecting     bool
+	connMu           sync.Mutex
+
+	serialSkipUntil time.Time
+	serialBackoff   = time.Second
+	maxSerialBackoff = 60 * time.Second
 )
 
-// 内嵌静态网页资源
 //go:embed www/*
 var webFS embed.FS
 
-// 全局路径
 var (
 	configPath = "config.json"
 	sockPath   = socketName
@@ -147,14 +134,34 @@ func initPaths() {
 	}
 }
 
-// 写日志
 func writeLog(msg string) {
 	t := time.Now().Format("2006-01-02 15:04:05")
 	fmt.Printf("[%s] %s\n", t, msg)
 }
 
-// 串口初始化
 func initSerial() bool {
+	connMu.Lock()
+	if isConnecting {
+		connMu.Unlock()
+		return false
+	}
+	isConnecting = true
+	connMu.Unlock()
+
+	defer func() {
+		connMu.Lock()
+		isConnecting = false
+		connMu.Unlock()
+	}()
+
+	// 指数退避：未到重试时间直接跳过
+	connMu.Lock()
+	skip := time.Now().Before(serialSkipUntil)
+	connMu.Unlock()
+	if skip {
+		return false
+	}
+
 	serialMu.Lock()
 	defer serialMu.Unlock()
 
@@ -171,14 +178,31 @@ func initSerial() bool {
 	s, err := serial.OpenPort(c)
 	if err != nil {
 		writeLog(fmt.Sprintf("串口打开失败：%v", err))
+		connMu.Lock()
+		serialSkipUntil = time.Now().Add(serialBackoff)
+		serialBackoff *= 2
+		if serialBackoff > maxSerialBackoff {
+			serialBackoff = maxSerialBackoff
+		}
+		connMu.Unlock()
 		return false
 	}
 	ser = s
 	writeLog(fmt.Sprintf("串口 %s 初始化成功", serialPort))
+	connMu.Lock()
+	serialSkipUntil = time.Time{}
+	serialBackoff = time.Second
+	connMu.Unlock()
 	return true
 }
 
-// 带反馈开关继电器
+func resetSerialBackoff() {
+	connMu.Lock()
+	serialSkipUntil = time.Time{}
+	serialBackoff = time.Second
+	connMu.Unlock()
+}
+
 func setFan(state bool) bool {
 	var s *serial.Port
 	serialMu.Lock()
@@ -240,7 +264,7 @@ func setFan(state bool) bool {
 		return true
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
 
 	resp := make([]byte, 32)
 	n, err := ser.Read(resp)
@@ -250,7 +274,7 @@ func setFan(state bool) bool {
 	}
 
 	actualResp := resp[:n]
-	if bytesContains(actualResp, expectStatus) {
+	if bytes.Contains(actualResp, expectStatus) {
 		mu.Lock()
 		if fanState != state {
 			fanState = state
@@ -265,7 +289,6 @@ func setFan(state bool) bool {
 	}
 }
 
-// 查询硬件状态
 func getHardwareRelayState() *bool {
 	mu.Lock()
 	hasFeed := hasFeedback
@@ -310,7 +333,7 @@ func getHardwareRelayState() *bool {
 		return nil
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
 
 	resp := make([]byte, 32)
 	n, err := ser.Read(resp)
@@ -320,14 +343,14 @@ func getHardwareRelayState() *bool {
 	}
 
 	actualResp := resp[:n]
-	if bytesContains(actualResp, stOn) {
+	if bytes.Contains(actualResp, stOn) {
 		res := true
 		mu.Lock()
 		lastRelayHwState = &res
 		fanState = true
 		mu.Unlock()
 		return &res
-	} else if bytesContains(actualResp, stOff) {
+	} else if bytes.Contains(actualResp, stOff) {
 		res := false
 		mu.Lock()
 		lastRelayHwState = &res
@@ -340,10 +363,92 @@ func getHardwareRelayState() *bool {
 	}
 }
 
-// 获取温度值
+func resolveTempPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "/") {
+		return path
+	}
+
+	if strings.HasPrefix(path, "hwmon:") {
+		parts := strings.Split(path, ":")
+		if len(parts) >= 3 {
+			hwmonName := parts[1]
+			tempFileWithSuffix := parts[2]
+			tempFile := strings.Fields(tempFileWithSuffix)[0] // 提取出类似 "temp1_input"
+
+			hwmonMatches, err := filepath.Glob("/sys/class/hwmon/hwmon*")
+			if err == nil {
+				for _, hwmonDir := range hwmonMatches {
+					nameFile := filepath.Join(hwmonDir, "name")
+					if fileExists(nameFile) {
+						nameData, err := os.ReadFile(nameFile)
+						if err == nil && strings.TrimSpace(string(nameData)) == hwmonName {
+							// 有注释时进行设备匹配校验
+							if strings.Contains(tempFileWithSuffix, " (") {
+								matched := false
+								if hwmonName == "drivetemp" {
+									wwidFile := filepath.Join(hwmonDir, "device", "wwid")
+									modelFile := filepath.Join(hwmonDir, "device", "model")
+									if fileExists(wwidFile) {
+										wD, _ := os.ReadFile(wwidFile)
+										if strings.Contains(tempFileWithSuffix, strings.TrimSpace(string(wD))) {
+											matched = true
+										}
+									} else if fileExists(modelFile) {
+										mD, _ := os.ReadFile(modelFile)
+										if strings.Contains(tempFileWithSuffix, strings.TrimSpace(string(mD))) {
+											matched = true
+										}
+									}
+								} else if hwmonName == "nvme" {
+									modelFile := filepath.Join(hwmonDir, "device", "model")
+									if !fileExists(modelFile) {
+										modelFile = filepath.Join(hwmonDir, "device", "device", "model")
+									}
+									if fileExists(modelFile) {
+										mD, _ := os.ReadFile(modelFile)
+										if strings.Contains(tempFileWithSuffix, strings.TrimSpace(string(mD))) {
+											matched = true
+										}
+									}
+									// NVMe 型号无论如何不跳过，仅通过 hwmon name 匹配
+									matched = true
+								} else if hwmonName != "coretemp" && hwmonName != "k10temp" {
+									// 其他设备校验 PCI 地址
+									deviceLink := filepath.Join(hwmonDir, "device")
+									if fileExists(deviceLink) {
+										realPath, err := os.Readlink(deviceLink)
+										if err == nil {
+											deviceId := filepath.Base(realPath)
+											if strings.Contains(tempFileWithSuffix, deviceId) {
+												matched = true
+											}
+										}
+									}
+								}
+								if !matched {
+									continue
+								}
+							}
+
+							targetInput := filepath.Join(hwmonDir, tempFile)
+							if fileExists(targetInput) {
+								return targetInput
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func getTemp() *float64 {
 	mu.Lock()
-	path := customTempPath
+	path := activeTempPath
 	mu.Unlock()
 
 	if path == "" || !fileExists(path) {
@@ -371,7 +476,6 @@ func fileExists(path string) bool {
 	return !os.IsNotExist(err)
 }
 
-// 配置文件管理
 type AppConfig struct {
 	Ceiling       float64 `json:"ceiling"`
 	Floor         float64 `json:"floor"`
@@ -415,7 +519,7 @@ func loadConfig() {
 			StatusOn:      toHexBytesStr(statusOn),
 			StatusOff:     toHexBytesStr(statusOff),
 		})
-		return
+		// 继续往下执行，读取刚写入的配置文件
 	}
 
 	data, err := os.ReadFile(configPath)
@@ -438,6 +542,7 @@ func loadConfig() {
 	baudRate = cfg.BaudRate
 	pollInterval = cfg.PollInterval
 	customTempPath = cfg.TempPath
+	activeTempPath = resolveTempPath(customTempPath)
 	if customTempPath == "" {
 		controlMode = "manual"
 	} else {
@@ -454,6 +559,7 @@ func loadConfig() {
 	opQuery, _ = parseHexBytes(cfg.OpQuery)
 	statusOn, _ = parseHexBytes(cfg.StatusOn)
 	statusOff, _ = parseHexBytes(cfg.StatusOff)
+	activeHwName, activeHwType = resolveActiveHwInfo(activeTempPath)
 	mu.Unlock()
 	writeLog("配置文件加载成功")
 }
@@ -501,10 +607,17 @@ func persistCurrentConfig() {
 	saveConfig(cfg)
 }
 
-// 温控后台循环
 func autoTempLoop() {
 	_ = initSerial()
-	_ = setFan(false)
+	
+	// 查询硬件初始状态
+	initialState := false
+	relaySt := getHardwareRelayState()
+	if relaySt != nil {
+		initialState = *relaySt
+	}
+	_ = setFan(initialState)
+
 	writeLog("自动温控后台启动")
 	for {
 		mu.Lock()
@@ -515,7 +628,16 @@ func autoTempLoop() {
 		onTime := lastTurnOnTime
 		minRun := minRunTime
 		win := filterWindow
+		hasFeed := hasFeedback
 		mu.Unlock()
+
+		// 有反馈后台状态同步
+		if hasFeed {
+			_ = getHardwareRelayState()
+			mu.Lock()
+			state = fanState
+			mu.Unlock()
+		}
 
 		if mode == "auto" {
 			tVal := getTemp()
@@ -562,28 +684,31 @@ func autoTempLoop() {
 	}
 }
 
-// Web 处理器
 type StatusResponse struct {
-	Temp          *float64 `json:"temp"`
-	RelayState    *bool    `json:"relay_state"`
-	Mode          string   `json:"mode"`
-	Ceiling       float64  `json:"ceiling"`
-	Floor         float64  `json:"floor"`
-	MinRunTime    int      `json:"min_run_time"`
-	FilterWindow  int      `json:"filter_window"`
-	SerialPort    string   `json:"serial_port"`
-	BaudRate      int      `json:"baud_rate"`
-	PollInterval  int      `json:"poll_interval"`
-	TempPath      string   `json:"temp_path"`
-	HasFeedback   bool     `json:"has_feedback"`
-	OpCloseNoFeed string   `json:"op_close_nofeed"`
-	OpOpenNoFeed  string   `json:"op_open_nofeed"`
-	OpCloseFeed   string   `json:"op_close_feed"`
-	OpOpenFeed    string   `json:"op_open_feed"`
-	OpToggleFeed  string   `json:"op_toggle_feed"`
-	OpQuery       string   `json:"op_query"`
-	StatusOn      string   `json:"status_on"`
-	StatusOff     string   `json:"status_off"`
+	Temp             *float64 `json:"temp"`
+	RelayState       *bool    `json:"relay_state"`
+	Mode             string   `json:"mode"`
+	Ceiling          float64  `json:"ceiling"`
+	Floor            float64  `json:"floor"`
+	MinRunTime       int      `json:"min_run_time"`
+	FilterWindow     int      `json:"filter_window"`
+	SerialPort       string   `json:"serial_port"`
+	BaudRate         int      `json:"baud_rate"`
+	PollInterval     int      `json:"poll_interval"`
+	TempPath         string   `json:"temp_path"`
+	HasFeedback      bool     `json:"has_feedback"`
+	OpCloseNoFeed    string   `json:"op_close_nofeed"`
+	OpOpenNoFeed     string   `json:"op_open_nofeed"`
+	OpCloseFeed      string   `json:"op_close_feed"`
+	OpOpenFeed       string   `json:"op_open_feed"`
+	OpToggleFeed     string   `json:"op_toggle_feed"`
+	OpQuery          string   `json:"op_query"`
+	StatusOn         string   `json:"status_on"`
+	StatusOff        string   `json:"status_off"`
+	HardwareName     string   `json:"hardware_name"`
+	HardwareType     string   `json:"hardware_type"`
+	SerialPortExists bool     `json:"serial_port_exists"`
+	TempPathExists   bool     `json:"temp_path_exists"`
 }
 
 type BasicResponse struct {
@@ -609,30 +734,36 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t := getTemp()
-	relaySt := getHardwareRelayState()
 
 	mu.Lock()
+	stateCopy := fanState
+	serialExists := fileExists(serialPort)
+	tempExists := customTempPath == "" || (activeTempPath != "" && fileExists(activeTempPath))
 	res := StatusResponse{
-		Temp:          t,
-		RelayState:    relaySt,
-		Mode:          controlMode,
-		Ceiling:       thresholdCeiling,
-		Floor:         thresholdFloor,
-		MinRunTime:    minRunTime,
-		FilterWindow:  filterWindow,
-		SerialPort:    serialPort,
-		BaudRate:      baudRate,
-		PollInterval:  pollInterval,
-		TempPath:      customTempPath,
-		HasFeedback:   hasFeedback,
-		OpCloseNoFeed: toHexBytesStr(opCloseNoFeed),
-		OpOpenNoFeed:  toHexBytesStr(opOpenNoFeed),
-		OpCloseFeed:   toHexBytesStr(opCloseFeed),
-		OpOpenFeed:    toHexBytesStr(opOpenFeed),
-		OpToggleFeed:  toHexBytesStr(opToggleFeed),
-		OpQuery:       toHexBytesStr(opQuery),
-		StatusOn:      toHexBytesStr(statusOn),
-		StatusOff:     toHexBytesStr(statusOff),
+		Temp:             t,
+		RelayState:       &stateCopy,
+		Mode:             controlMode,
+		Ceiling:          thresholdCeiling,
+		Floor:            thresholdFloor,
+		MinRunTime:       minRunTime,
+		FilterWindow:     filterWindow,
+		SerialPort:       serialPort,
+		BaudRate:         baudRate,
+		PollInterval:     pollInterval,
+		TempPath:         customTempPath,
+		HasFeedback:      hasFeedback,
+		OpCloseNoFeed:    toHexBytesStr(opCloseNoFeed),
+		OpOpenNoFeed:     toHexBytesStr(opOpenNoFeed),
+		OpCloseFeed:      toHexBytesStr(opCloseFeed),
+		OpOpenFeed:       toHexBytesStr(opOpenFeed),
+		OpToggleFeed:     toHexBytesStr(opToggleFeed),
+		OpQuery:          toHexBytesStr(opQuery),
+		StatusOn:         toHexBytesStr(statusOn),
+		StatusOff:        toHexBytesStr(statusOff),
+		HardwareName:     activeHwName,
+		HardwareType:     activeHwType,
+		SerialPortExists: serialExists,
+		TempPathExists:   tempExists,
 	}
 	mu.Unlock()
 	writeJSON(w, http.StatusOK, res)
@@ -795,11 +926,13 @@ func handleSetConfig(w http.ResponseWriter, r *http.Request) {
 	baudRate = req.BaudRate
 	pollInterval = req.PollInterval
 	customTempPath = req.TempPath
+	activeTempPath = resolveTempPath(customTempPath)
+	activeHwName, activeHwType = resolveActiveHwInfo(activeTempPath)
 	if customTempPath == "" {
 		controlMode = "manual"
 	}
 	hasFeedback = req.HasFeedback
-	
+
 	opCloseNoFeed = parsedCloseNoFeed
 	opOpenNoFeed = parsedOpenNoFeed
 	opCloseFeed = parsedCloseFeed
@@ -808,15 +941,16 @@ func handleSetConfig(w http.ResponseWriter, r *http.Request) {
 	opQuery = parsedQuery
 	statusOn = parsedStatusOn
 	statusOff = parsedStatusOff
-	
+
 	tempHistory = nil
 	mu.Unlock()
 
 	persistCurrentConfig()
 
-	writeLog(fmt.Sprintf("API更新配置成功：上限 %.2f℃，下限 %.2f℃，防抖最少时间 %d秒，平滑窗口 %d次，串口 %s", 
+	writeLog(fmt.Sprintf("API更新配置成功：上限 %.2f℃，下限 %.2f℃，防抖最少时间 %d秒，平滑窗口 %d次，串口 %s",
 		req.Ceiling, req.Floor, req.MinRunTime, req.FilterWindow, req.SerialPort))
 
+	resetSerialBackoff() // 用户修改配置，先重置串口退避再触发重连
 	if oldPort != req.SerialPort || oldBaud != req.BaudRate {
 		writeLog("检测到串口或波特率变更，重新初始化串口")
 		go initSerial()
@@ -840,19 +974,324 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, QueryResponse{Success: success, RelayState: relaySt, Message: msg})
 }
 
-// 启动 Web 服务
+type TempSensorInfo struct {
+	Path         string  `json:"path"`
+	Type         string  `json:"type"`
+	Name         string  `json:"name"`
+	Recommended  bool    `json:"recommended"`
+	CurrentTemp  float64 `json:"current_temp"`
+	HardwareName string  `json:"hardware_name"`
+	HardwareType string  `json:"hardware_type"`
+}
+
+type SerialPortInfo struct {
+	Path string `json:"path"`
+	Name string `json:"name"`
+}
+
+func getCPUModel() string {
+	data, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "model name") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return ""
+}
+
+func readDMI(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func getGPUName(hwmonDir string) string {
+	deviceLink := filepath.Join(hwmonDir, "device")
+	if !fileExists(deviceLink) {
+		return ""
+	}
+	realPath, err := os.Readlink(deviceLink)
+	if err != nil {
+		return ""
+	}
+	deviceID := filepath.Base(realPath)
+
+	// Try to read card name from /sys/class/drm
+	drmGlob, err := filepath.Glob("/sys/class/drm/card*/device/device")
+	if err == nil {
+		for _, drmDevice := range drmGlob {
+			drmReal, _ := os.Readlink(filepath.Dir(drmDevice))
+			if drmReal != "" && filepath.Base(drmReal) == deviceID {
+				vendorFile := filepath.Join(filepath.Dir(drmDevice), "vendor")
+				nameFile := filepath.Join(filepath.Dir(drmDevice), "product_name")
+				if fileExists(nameFile) {
+					name, _ := os.ReadFile(nameFile)
+					if s := strings.TrimSpace(string(name)); s != "" {
+						return s
+					}
+				}
+				if fileExists(vendorFile) {
+					vendorData, _ := os.ReadFile(vendorFile)
+					return fmt.Sprintf("PCI %s:%s", strings.TrimSpace(string(vendorData)), deviceID)
+				}
+				break
+			}
+		}
+	}
+	return deviceID
+}
+
+func getBoardName() string {
+	// Try multiple DMI paths for board name
+	for _, p := range []string{
+		"/sys/class/dmi/id/board_name",
+		"/sys/class/dmi/id/product_name",
+		"/sys/class/dmi/id/board_vendor",
+	} {
+		if name := readDMI(p); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func readLabelName(hwmonDir, tempFile string) string {
+	labelFile := filepath.Join(hwmonDir, strings.Replace(tempFile, "_input", "_label", 1))
+	if fileExists(labelFile) {
+		labelData, err := os.ReadFile(labelFile)
+		if err == nil {
+			return strings.TrimSpace(string(labelData))
+		}
+	}
+	return ""
+}
+
+func resolveActiveHwInfo(path string) (name, hwType string) {
+	if path == "" {
+		return "", ""
+	}
+	for _, s := range listTempSensors() {
+		if s.Path == path {
+			return s.HardwareName, s.HardwareType
+		}
+	}
+	return "", ""
+}
+
+func listTempSensors() []TempSensorInfo {
+	var sensors []TempSensorInfo
+	seenPaths := make(map[string]bool)
+
+	cpuModel := getCPUModel()
+	boardName := getBoardName()
+
+	hwmonMatches, err := filepath.Glob("/sys/class/hwmon/hwmon*")
+	if err == nil {
+		for _, hwmonDir := range hwmonMatches {
+			nameFile := filepath.Join(hwmonDir, "name")
+			if !fileExists(nameFile) {
+				continue
+			}
+			nameData, err := os.ReadFile(nameFile)
+			if err != nil {
+				continue
+			}
+			hwmonName := strings.TrimSpace(string(nameData))
+			lowerName := strings.ToLower(hwmonName)
+
+			// 确定硬件类型
+			hwType := ""
+			switch {
+			case strings.Contains(lowerName, "coretemp") || strings.Contains(lowerName, "k10temp") ||
+				strings.Contains(lowerName, "zenpower") || strings.Contains(lowerName, "tctl") ||
+				strings.Contains(lowerName, "tdie") || strings.Contains(lowerName, "amd_node"):
+				hwType = "CPU"
+			case strings.Contains(lowerName, "drivetemp") || strings.Contains(lowerName, "nvme"):
+				hwType = "硬盘"
+			case strings.Contains(lowerName, "amdgpu") || strings.Contains(lowerName, "nouveau") ||
+				strings.Contains(lowerName, "nvidia") || strings.Contains(lowerName, "i915"):
+				hwType = "GPU"
+			case strings.Contains(lowerName, "dram") || strings.Contains(lowerName, "ddr") ||
+				strings.Contains(lowerName, "mem") || strings.Contains(lowerName, "jedec") ||
+				strings.Contains(lowerName, "tsod"):
+				hwType = "内存"
+			case strings.Contains(lowerName, "nct") || strings.Contains(lowerName, "it87") ||
+				strings.Contains(lowerName, "f718") || strings.Contains(lowerName, "acpi") ||
+				strings.Contains(lowerName, "pch") || strings.Contains(lowerName, "board") ||
+				strings.Contains(lowerName, "mb") || strings.Contains(lowerName, "tz"):
+				hwType = "主板"
+			default:
+				hwType = "其他"
+			}
+
+			tempInputs, err := filepath.Glob(filepath.Join(hwmonDir, "temp*_input"))
+			if err != nil {
+				continue
+			}
+
+			for _, tempInput := range tempInputs {
+				realInputPath, err := filepath.EvalSymlinks(tempInput)
+				if err != nil {
+					realInputPath = tempInput
+				}
+				if seenPaths[realInputPath] {
+					continue
+				}
+
+				tempFile := filepath.Base(tempInput)
+
+				// 只保留主温度 (temp1)，跳过各子传感器
+				if hwType != "" && hwType != "其他" && !strings.Contains(tempFile, "temp1") {
+					continue
+				}
+
+				label := readLabelName(hwmonDir, tempFile)
+
+				sensorType := fmt.Sprintf("hwmon:%s:%s", hwmonName, tempFile)
+
+				// 硬件名称
+				hwName := ""
+
+				if hwType == "CPU" {
+					hwName = cpuModel
+				} else if hwType == "硬盘" {
+					modelFile := filepath.Join(hwmonDir, "device", "model")
+					if !fileExists(modelFile) {
+						modelFile = filepath.Join(hwmonDir, "device", "device", "model")
+					}
+					if fileExists(modelFile) {
+						mD, _ := os.ReadFile(modelFile)
+						hwName = strings.TrimSpace(string(mD))
+					}
+				} else if hwType == "GPU" {
+					hwName = getGPUName(hwmonDir)
+				} else if label != "" {
+					hwName = label
+				}
+
+				// 内存/主板/其他等没有专用名称时使用 DMI 或驱动名
+				if hwName == "" {
+					switch hwType {
+					case "内存":
+						hwName = "系统内存"
+					case "主板":
+						if boardName != "" {
+							hwName = boardName
+						} else {
+							hwName = hwmonName
+						}
+					default:
+						hwName = hwmonName
+					}
+				}
+
+				var currentTemp float64
+				tempData, err := os.ReadFile(tempInput)
+				if err == nil {
+					raw, err := strconv.Atoi(strings.TrimSpace(string(tempData)))
+					if err == nil {
+						currentTemp = float64(raw) / 1000.0
+					}
+				}
+
+				sensors = append(sensors, TempSensorInfo{
+					Path:         tempInput,
+					Type:         sensorType,
+					Name:         fmt.Sprintf("%s (%s)", filepath.Base(hwmonDir)+"_"+tempFile, sensorType),
+					Recommended:  false,
+					CurrentTemp:  currentTemp,
+					HardwareName: hwName,
+					HardwareType: hwType,
+				})
+				seenPaths[realInputPath] = true
+			}
+		}
+	}
+
+	return sensors
+}
+
+func listSerialPorts() []SerialPortInfo {
+	var ports []SerialPortInfo
+
+	if matches, err := filepath.Glob("/dev/serial/by-id/*"); err == nil {
+		for _, match := range matches {
+			ports = append(ports, SerialPortInfo{
+				Path: match,
+				Name: filepath.Base(match) + " (固定ID)",
+			})
+		}
+	}
+
+	if matches, err := filepath.Glob("/dev/ttyUSB*"); err == nil {
+		for _, match := range matches {
+			ports = append(ports, SerialPortInfo{
+				Path: match,
+				Name: filepath.Base(match),
+			})
+		}
+	}
+
+	if matches, err := filepath.Glob("/dev/ttyACM*"); err == nil {
+		for _, match := range matches {
+			ports = append(ports, SerialPortInfo{
+				Path: match,
+				Name: filepath.Base(match),
+			})
+		}
+	}
+
+	seen := make(map[string]bool)
+	var uniquePorts []SerialPortInfo
+	for _, p := range ports {
+		if !seen[p.Path] {
+			seen[p.Path] = true
+			uniquePorts = append(uniquePorts, p)
+		}
+	}
+
+	return uniquePorts
+}
+
+func handleListTempSensors(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, BasicResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	sensors := listTempSensors()
+	writeJSON(w, http.StatusOK, sensors)
+}
+
+func handleListSerialPorts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, BasicResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	ports := listSerialPorts()
+	writeJSON(w, http.StatusOK, ports)
+}
+
 func startWebServer() {
 	mux := http.NewServeMux()
 	prefix := gatewayPrefix
 
-	// 批量挂载 API
 	apiRoutes := map[string]http.HandlerFunc{
-		"/api/status":     handleStatus,
-		"/api/open":       handleOpen,
-		"/api/close":      handleClose,
-		"/api/set_mode":   handleSetMode,
-		"/api/set_config": handleSetConfig,
-		"/api/query":      handleQuery,
+		"/api/status":            handleStatus,
+		"/api/open":              handleOpen,
+		"/api/close":             handleClose,
+		"/api/set_mode":          handleSetMode,
+		"/api/set_config":        handleSetConfig,
+		"/api/query":             handleQuery,
+		"/api/list_temp_sensors": handleListTempSensors,
+		"/api/list_serial_ports": handleListSerialPorts,
 	}
 	for path, handler := range apiRoutes {
 		mux.HandleFunc(path, handler)
@@ -875,7 +1314,6 @@ func startWebServer() {
 
 	writeLog(fmt.Sprintf("Web服务准备监听 UNIX Domain Socket: %s", sockPath))
 
-	// 捕获信号以清理 Socket
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -891,7 +1329,6 @@ func startWebServer() {
 		log.Fatalf("监听 Unix Socket 失败: %v", err)
 	}
 
-	// 设置 Socket 权限，确保反代可通信
 	_ = os.Chmod(sockPath, 0666)
 
 	go func() {
@@ -907,7 +1344,6 @@ func startWebServer() {
 	}
 }
 
-// 主入口
 func main() {
 	initPaths()
 	loadConfig()

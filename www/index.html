@@ -23,6 +23,9 @@
                     <div class="gauge-wrapper">
                         <svg class="gauge-svg" viewBox="0 0 120 120">
                             <circle class="gauge-bg" cx="60" cy="60" r="50"></circle>
+                            <circle id="zone-lower" class="gauge-zone" cx="60" cy="60" r="50" />
+                            <circle id="zone-mid" class="gauge-zone" cx="60" cy="60" r="50" />
+                            <circle id="zone-upper" class="gauge-zone" cx="60" cy="60" r="50" />
                             <circle id="gauge-fill" class="gauge-fill" cx="60" cy="60" r="50"></circle>
                         </svg>
                         <div class="gauge-info">
@@ -34,12 +37,12 @@
 
                 <div class="info-list">
                     <div class="info-item">
-                        <span class="info-label">继电器状态</span>
-                        <span id="relay-status" class="info-value text-unknown">加载中...</span>
+                        <span class="info-label">温度监测源</span>
+                        <span id="temp-source" class="info-value text-unknown">加载中...</span>
                     </div>
                     <div class="info-item">
-                        <span class="info-label">当前运行模式</span>
-                        <span id="mode-status" class="info-value text-unknown">加载中...</span>
+                        <span class="info-label">继电器状态</span>
+                        <span id="relay-status" class="info-value text-unknown">加载中...</span>
                     </div>
                 </div>
             </section>
@@ -119,16 +122,16 @@
                                 <input type="number" id="modal-input-poll-interval" min="1" max="60" placeholder="如 3" required>
                             </div>
                             <div class="form-group">
-                                <label for="modal-input-serial-port">串口设备路径</label>
-                                <input type="text" id="modal-input-serial-port" placeholder="如 /dev/ttyUSB0" required>
+                                <label for="modal-input-serial-port">串口设备</label>
+                                <select id="modal-input-serial-port" required></select>
                             </div>
                             <div class="form-group">
                                 <label for="modal-input-baud-rate">波特率</label>
                                 <input type="number" id="modal-input-baud-rate" placeholder="如 9600" required>
                             </div>
                             <div class="form-group">
-                                <label for="modal-input-temp-path">温度文件路径</label>
-                                <input type="text" id="modal-input-temp-path" placeholder="如 /sys/class/thermal/thermal_zone1/temp">
+                                <label for="modal-input-temp-path">温度传感器</label>
+                                <select id="modal-input-temp-path" required></select>
                             </div>
                         </div>
                         <div class="form-group switch-group" style="margin-top: 20px; flex-direction: row; align-items: center; justify-content: space-between;">
