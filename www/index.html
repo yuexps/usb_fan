@@ -15,18 +15,36 @@
             <section class="card status-card">
                 <div class="card-header">
                     <h2>实时状态监测</h2>
-                    <span id="connection-badge" class="badge badge-online">连接正常</span>
+                    <span id="debounce-badge" class="badge badge-debounce" style="opacity: 0; pointer-events: none;">超限</span>
                 </div>
 
                 <div class="temp-gauge-container">
                     <!-- 温度圆环仪表盘 -->
                     <div class="gauge-wrapper">
                         <svg class="gauge-svg" viewBox="0 0 120 120">
+                            <defs>
+                                <linearGradient id="grad-cool" x1="0%" y1="100%" x2="100%" y2="0%">
+                                    <stop offset="0%" stop-color="#06b6d4" />
+                                    <stop offset="100%" stop-color="#3b82f6" />
+                                </linearGradient>
+                                <linearGradient id="grad-warm" x1="0%" y1="100%" x2="100%" y2="0%">
+                                    <stop offset="0%" stop-color="#f59e0b" />
+                                    <stop offset="100%" stop-color="#f97316" />
+                                </linearGradient>
+                                <linearGradient id="grad-hot" x1="0%" y1="100%" x2="100%" y2="0%">
+                                    <stop offset="0%" stop-color="#ef4444" />
+                                    <stop offset="100%" stop-color="#ec4899" />
+                                </linearGradient>
+                            </defs>
+                            <circle class="gauge-track-outer" cx="60" cy="60" r="56"></circle>
+                            <circle class="gauge-ticks" cx="60" cy="60" r="55"></circle>
+                            <circle class="gauge-center-bg" cx="60" cy="60" r="43"></circle>
                             <circle class="gauge-bg" cx="60" cy="60" r="50"></circle>
                             <circle id="zone-lower" class="gauge-zone" cx="60" cy="60" r="50" />
                             <circle id="zone-mid" class="gauge-zone" cx="60" cy="60" r="50" />
                             <circle id="zone-upper" class="gauge-zone" cx="60" cy="60" r="50" />
                             <circle id="gauge-fill" class="gauge-fill" cx="60" cy="60" r="50"></circle>
+                            <circle class="gauge-track-inner" cx="60" cy="60" r="44"></circle>
                         </svg>
                         <div class="gauge-info">
                             <span id="temp-display" class="temp-val">--</span>
@@ -38,41 +56,44 @@
                 <div class="info-list">
                     <div class="info-item">
                         <span class="info-label">温度监测源</span>
-                        <span id="temp-source" class="info-value text-unknown">加载中...</span>
+                        <span id="temp-source" class="info-value text-unknown">加载中</span>
                     </div>
                     <div class="info-item">
                         <span class="info-label">继电器状态</span>
-                        <span id="relay-status" class="info-value text-unknown">加载中...</span>
+                        <span id="relay-status" class="info-value text-unknown">加载中</span>
                     </div>
                 </div>
             </section>
 
-            <!-- 右侧：控制中心 -->
+            <!-- 右侧：设备控制中心 -->
             <div class="control-column">
-                <!-- 运行模式与温控参数 -->
-                <section class="card config-card">
-                    <h2>运行模式与温控参数</h2>
-                    <div class="mode-selector">
-                        <button id="btn-mode-auto" class="btn-mode">自动温控</button>
-                        <button id="btn-mode-manual" class="btn-mode">手动控制</button>
+                <section class="card control-card">
+                    <div class="card-header">
+                        <h2>设备控制中心</h2>
+                        <span id="conn-badge" class="badge badge-offline">已断开</span>
                     </div>
 
-                    <div style="margin-top: 20px;">
+                    <!-- 运行模式 -->
+                    <div style="margin-bottom: 20px;">
+                        <div class="mode-selector">
+                            <button id="btn-mode-auto" class="btn-mode">自动温控</button>
+                            <button id="btn-mode-manual" class="btn-mode">手动控制</button>
+                        </div>
+                    </div>
+
+                    <!-- 手动开关控制 (自动模式下此区域将置灰锁定) -->
+                    <div id="manual-control-section"
+                        style="padding: 16px; background: rgba(15, 23, 42, 0.02); border: 1px solid rgba(15, 23, 42, 0.03); border-radius: 16px; margin-bottom: 20px;">
+                        <div class="control-btn-group" style="margin-bottom: 0;">
+                            <button id="btn-fan-open" class="btn btn-open">开启继电器</button>
+                            <button id="btn-fan-close" class="btn btn-close">关闭继电器</button>
+                        </div>
+                    </div>
+
+                    <!-- 系统参数配置 -->
+                    <div>
                         <button id="btn-open-config" class="btn btn-config-toggle">系统参数配置</button>
                     </div>
-                </section>
-
-                <!-- 手动开关控制 -->
-                <section class="card manual-card" id="manual-control-section">
-                    <h2>手动继电器控制</h2>
-                    <div class="control-btn-group">
-                        <button id="btn-fan-open" class="btn btn-open">开启继电器</button>
-                        <button id="btn-fan-close" class="btn btn-close">关闭继电器</button>
-                    </div>
-                    <button id="btn-fan-query" class="btn btn-query">
-                        <span class="btn-text">手动查询硬件状态</span>
-                        <span class="spinner" id="query-spinner"></span>
-                    </button>
                 </section>
             </div>
         </main>
@@ -96,19 +117,23 @@
                         <div class="form-grid">
                             <div class="form-group">
                                 <label for="modal-input-ceiling">温度上限 (℃)</label>
-                                <input type="number" id="modal-input-ceiling" step="0.1" min="0" max="100" placeholder="如 55.0" required>
+                                <input type="number" id="modal-input-ceiling" step="0.1" min="0" max="100"
+                                    placeholder="如 55.0" required>
                             </div>
                             <div class="form-group">
                                 <label for="modal-input-floor">温度下限 (℃)</label>
-                                <input type="number" id="modal-input-floor" step="0.1" min="0" max="100" placeholder="如 50.0" required>
+                                <input type="number" id="modal-input-floor" step="0.1" min="0" max="100"
+                                    placeholder="如 50.0" required>
                             </div>
                             <div class="form-group">
                                 <label for="modal-input-min-run">最少运行时间 (秒)</label>
-                                <input type="number" id="modal-input-min-run" min="5" max="3600" placeholder="如 30" required>
+                                <input type="number" id="modal-input-min-run" min="5" max="3600" placeholder="如 30"
+                                    required>
                             </div>
                             <div class="form-group">
-                                <label for="modal-input-filter-window">平滑窗口大小 (次)</label>
-                                <input type="number" id="modal-input-filter-window" min="1" max="10" placeholder="如 3" required>
+                                <label for="modal-input-filter-window">消抖判定次数 (次)</label>
+                                <input type="number" id="modal-input-filter-window" min="1" max="10" placeholder="如 3"
+                                    required>
                             </div>
                         </div>
                     </div>
@@ -116,10 +141,11 @@
                     <!-- 硬件与采集配置 -->
                     <div class="form-section">
                         <h3>硬件与采集配置</h3>
-                        <div class="form-grid">
+                        <div id="hw-group" class="form-grid">
                             <div class="form-group">
                                 <label for="modal-input-poll-interval">温度采集间隔 (秒)</label>
-                                <input type="number" id="modal-input-poll-interval" min="1" max="60" placeholder="如 3" required>
+                                <input type="number" id="modal-input-poll-interval" min="1" max="60" placeholder="如 3"
+                                    required>
                             </div>
                             <div class="form-group">
                                 <label for="modal-input-serial-port">串口设备</label>
@@ -134,8 +160,10 @@
                                 <select id="modal-input-temp-path" required></select>
                             </div>
                         </div>
-                        <div class="form-group switch-group" style="margin-top: 20px; flex-direction: row; align-items: center; justify-content: space-between;">
-                            <span style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary);">启用指令状态反馈</span>
+                        <div class="form-group switch-group"
+                            style="margin-top: 20px; flex-direction: row; align-items: center; justify-content: space-between;">
+                            <span
+                                style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary);">启用指令状态反馈</span>
                             <label class="switch">
                                 <input type="checkbox" id="modal-input-has-feedback">
                                 <span class="slider"></span>
@@ -146,15 +174,15 @@
                     <!-- 继电器控制协议配置 -->
                     <div class="form-section">
                         <h3>继电器协议配置</h3>
-                        
+
                         <!-- 无反馈操作码配置组 -->
                         <div id="nofeed-group" class="form-grid">
                             <div class="form-group">
-                                <label for="modal-input-op-open-nofeed">无反馈开启指令码</label>
+                                <label for="modal-input-op-open-nofeed">无反馈开启指令 (Hex)</label>
                                 <input type="text" id="modal-input-op-open-nofeed" placeholder="如 A00101A2">
                             </div>
                             <div class="form-group">
-                                <label for="modal-input-op-close-nofeed">无反馈关闭指令码</label>
+                                <label for="modal-input-op-close-nofeed">无反馈关闭指令 (Hex)</label>
                                 <input type="text" id="modal-input-op-close-nofeed" placeholder="如 A00100A1">
                             </div>
                         </div>
@@ -162,27 +190,27 @@
                         <!-- 有反馈操作码配置组 -->
                         <div id="feed-group" class="form-grid">
                             <div class="form-group">
-                                <label for="modal-input-op-open-feed">有反馈开启指令码</label>
+                                <label for="modal-input-op-open-feed">有反馈开启指令 (Hex)</label>
                                 <input type="text" id="modal-input-op-open-feed" placeholder="如 A00103A4">
                             </div>
                             <div class="form-group">
-                                <label for="modal-input-op-close-feed">有反馈关闭指令码</label>
+                                <label for="modal-input-op-close-feed">有反馈关闭指令 (Hex)</label>
                                 <input type="text" id="modal-input-op-close-feed" placeholder="如 A00102A3">
                             </div>
                             <div class="form-group">
-                                <label for="modal-input-op-toggle-feed">指令状态反转码</label>
+                                <label for="modal-input-op-toggle-feed">状态翻转指令 (Hex)</label>
                                 <input type="text" id="modal-input-op-toggle-feed" placeholder="如 A00104A5">
                             </div>
                             <div class="form-group">
-                                <label for="modal-input-op-query">硬件状态查询码</label>
+                                <label for="modal-input-op-query">状态查询指令 (Hex)</label>
                                 <input type="text" id="modal-input-op-query" placeholder="如 A00105A6">
                             </div>
                             <div class="form-group">
-                                <label for="modal-input-status-on">状态开启判定值</label>
+                                <label for="modal-input-status-on">开启回执特征码 (Hex)</label>
                                 <input type="text" id="modal-input-status-on" placeholder="如 A00101A2">
                             </div>
                             <div class="form-group">
-                                <label for="modal-input-status-off">状态关闭判定值</label>
+                                <label for="modal-input-status-off">关闭回执特征码 (Hex)</label>
                                 <input type="text" id="modal-input-status-off" placeholder="如 A00100A1">
                             </div>
                         </div>

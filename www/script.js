@@ -3,7 +3,8 @@ const tempDisplay = document.getElementById('temp-display');
 const gaugeFill = document.getElementById('gauge-fill');
 const tempSource = document.getElementById('temp-source');
 const relayStatus = document.getElementById('relay-status');
-const connectionBadge = document.getElementById('connection-badge');
+const debounceBadge = document.getElementById('debounce-badge');
+const connBadge = document.getElementById('conn-badge');
 
 const btnModeAuto = document.getElementById('btn-mode-auto');
 const btnModeManual = document.getElementById('btn-mode-manual');
@@ -11,8 +12,6 @@ const manualControlSection = document.getElementById('manual-control-section');
 
 const btnFanOpen = document.getElementById('btn-fan-open');
 const btnFanClose = document.getElementById('btn-fan-close');
-const btnFanQuery = document.getElementById('btn-fan-query');
-const querySpinner = document.getElementById('query-spinner');
 
 // 新增配置弹窗相关元素
 const btnOpenConfig = document.getElementById('btn-open-config');
@@ -99,7 +98,9 @@ function updateGauge(temp, ceiling, floor) {
     if (temp === null || isNaN(temp)) {
         tempDisplay.textContent = '--';
         gaugeFill.style.strokeDashoffset = perimeter;
-        gaugeFill.style.stroke = 'var(--color-cool)';
+        gaugeFill.style.stroke = 'url(#grad-cool)';
+        gaugeFill.style.setProperty('--gauge-glow-color', 'rgba(6, 182, 212, 0.4)');
+        gaugeFill.style.setProperty('--temp-text-color', 'var(--text-primary)');
         return;
     }
 
@@ -110,18 +111,24 @@ function updateGauge(temp, ceiling, floor) {
     gaugeFill.style.strokeDashoffset = offset;
 
     if (temp < 50) {
-        gaugeFill.style.stroke = 'var(--color-cool)';
+        gaugeFill.style.stroke = 'url(#grad-cool)';
+        gaugeFill.style.setProperty('--gauge-glow-color', 'rgba(6, 182, 212, 0.45)');
+        gaugeFill.style.setProperty('--temp-text-color', '#0284c7');
     } else if (temp < 65) {
-        gaugeFill.style.stroke = 'var(--color-warm)';
+        gaugeFill.style.stroke = 'url(#grad-warm)';
+        gaugeFill.style.setProperty('--gauge-glow-color', 'rgba(245, 158, 11, 0.45)');
+        gaugeFill.style.setProperty('--temp-text-color', '#d97706');
     } else {
-        gaugeFill.style.stroke = 'var(--color-hot)';
+        gaugeFill.style.stroke = 'url(#grad-hot)';
+        gaugeFill.style.setProperty('--gauge-glow-color', 'rgba(239, 68, 68, 0.45)');
+        gaugeFill.style.setProperty('--temp-text-color', '#dc2626');
     }
 }
 
 function updateGaugeZones(ceiling, floor, maxTemp, perimeter) {
     const zones = [
-        { id: 'zone-lower', f1: 0,      f2: floor,   color: 'var(--color-green)' },
-        { id: 'zone-mid',   f1: floor,   f2: ceiling, color: 'var(--color-warm)' },
+        { id: 'zone-lower', f1: 0, f2: floor, color: 'var(--color-green)' },
+        { id: 'zone-mid', f1: floor, f2: ceiling, color: 'var(--color-warm)' },
         { id: 'zone-upper', f1: ceiling, f2: maxTemp, color: 'var(--color-hot)' },
     ];
     zones.forEach(({ id, f1, f2, color }) => {
@@ -160,11 +167,28 @@ function updateUI(data) {
     // 连接恢复时重置断联标志
     wasOffline = false;
 
-    // 1. 在线状态 Badge
-    connectionBadge.textContent = "连接正常";
-    connectionBadge.className = "badge badge-online";
+    if (connBadge) {
+        connBadge.textContent = '已连接';
+        connBadge.className = 'badge badge-online';
+    }
 
-    // 2. 温度仪表盘（含上下限标记）
+    // 1. 消抖状态角标显示逻辑
+    let showDebounce = false;
+    if (data.mode === 'auto') {
+        if (!data.relay_state && data.over_ceiling_count > 0) {
+            const pct = (data.over_ceiling_count / data.filter_window) * 100;
+            debounceBadge.innerHTML = `<span>超限</span><div class="mini-progress-bar"><div class="mini-progress-fill" style="width: ${pct}%"></div></div>`;
+            showDebounce = true;
+        } else if (data.relay_state && data.under_floor_count > 0) {
+            const pct = (data.under_floor_count / data.filter_window) * 100;
+            debounceBadge.innerHTML = `<span>冷却</span><div class="mini-progress-bar"><div class="mini-progress-fill" style="width: ${pct}%"></div></div>`;
+            showDebounce = true;
+        }
+    }
+    debounceBadge.style.opacity = showDebounce ? '1' : '0';
+    debounceBadge.style.pointerEvents = showDebounce ? 'auto' : 'none';
+
+    // 2. 温度仪表盘
     updateGauge(data.temp, data.ceiling, data.floor);
 
     // 2.5 温度监测源
@@ -228,7 +252,6 @@ function updateUI(data) {
         manualControlSection.classList.add('card-disabled-overlay');
         btnFanOpen.disabled = true;
         btnFanClose.disabled = true;
-        btnFanQuery.disabled = true;
     } else if (data.mode === 'manual') {
         btnModeAuto.className = 'btn-mode';
         btnModeManual.className = 'btn-mode active-manual';
@@ -236,7 +259,6 @@ function updateUI(data) {
         manualControlSection.classList.remove('card-disabled-overlay');
         btnFanOpen.disabled = false;
         btnFanClose.disabled = false;
-        btnFanQuery.disabled = false;
     }
 
     // 缓存配置状态
@@ -327,8 +349,6 @@ function handleOffline(error) {
         wasOffline = true;
         showToast("与后端服务连接断开", 'error');
     }
-    connectionBadge.textContent = "离线/断开";
-    connectionBadge.className = "badge badge-offline";
     tempDisplay.textContent = '--';
     gaugeFill.style.strokeDashoffset = 2 * Math.PI * 50;
     ['zone-lower', 'zone-mid', 'zone-upper'].forEach(id => {
@@ -339,20 +359,59 @@ function handleOffline(error) {
     tempSource.className = 'info-value text-unknown';
     relayStatus.textContent = '读取失败';
     relayStatus.className = 'info-value text-unknown';
+    debounceBadge.style.opacity = '0';
+    debounceBadge.style.pointerEvents = 'none';
+    if (connBadge) {
+        connBadge.textContent = '已断开';
+        connBadge.className = 'badge badge-offline';
+    }
 }
 
 // ====================== API 交互请求 ======================
 
-// 获取所有数据状态
-async function fetchStatus() {
-    try {
-        const response = await fetch('api/status');
-        if (!response.ok) throw new Error("Server response error");
-        const data = await response.json();
-        updateUI(data);
-    } catch (err) {
-        handleOffline(err);
-    }
+let ws = null;
+let reconnectDelay = 1000;
+
+function connectWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    const path = window.location.pathname.replace(/\/$/, '');
+    const wsUrl = `${protocol}//${host}${path}/api/ws`;
+
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+        console.log("WebSocket connected to:", wsUrl);
+        reconnectDelay = 1000;
+        wasOffline = false;
+        if (connBadge) {
+            connBadge.textContent = '连接中';
+            connBadge.className = 'badge badge-debounce';
+        }
+    };
+
+    ws.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            updateUI(data);
+        } catch (err) {
+            console.error("解析 WebSocket 数据失败:", err);
+        }
+    };
+
+    ws.onclose = (e) => {
+        console.log("WebSocket connection closed, reconnecting...", e);
+        handleOffline(e);
+        setTimeout(() => {
+            connectWebSocket();
+        }, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+    };
+
+    ws.onerror = (err) => {
+        console.error("WebSocket error:", err);
+        ws.close();
+    };
 }
 
 // 设置运行模式
@@ -366,7 +425,6 @@ async function setMode(mode) {
         const res = await response.json();
         if (res.success) {
             showToast(res.message, 'success');
-            fetchStatus();
         } else {
             showToast(res.message, 'error');
         }
@@ -384,7 +442,6 @@ async function controlFan(state) {
         const res = await response.json();
         if (res.success) {
             showToast(res.message, 'success');
-            fetchStatus();
         } else {
             showToast(res.message, 'error');
         }
@@ -393,27 +450,6 @@ async function controlFan(state) {
     }
 }
 
-// 手动查询状态
-async function queryHardwareState() {
-    btnFanQuery.classList.add('loading');
-    btnFanQuery.disabled = true;
-    try {
-        const response = await fetch('api/query', { method: 'POST' });
-        const res = await response.json();
-        if (res.success) {
-            const stateStr = res.relay_state === true ? "开启" : (res.relay_state === false ? "关闭" : "未知");
-            showToast(`状态同步成功，当前硬件状态为：【${stateStr}】`, 'success');
-            fetchStatus();
-        } else {
-            showToast(res.message, 'error');
-        }
-    } catch (err) {
-        showToast("查询继电器状态失败，硬件无响应或连接异常", 'error');
-    } finally {
-        btnFanQuery.classList.remove('loading');
-        btnFanQuery.disabled = false;
-    }
-}
 
 // ====================== 保存配置 ======================
 async function saveConfig() {
@@ -445,7 +481,7 @@ async function saveConfig() {
     }
 
     if (filter_window < 1 || filter_window > 10) {
-        showToast("平滑窗口大小必须在 1 至 10 之间", 'error');
+        showToast("消抖判定次数必须在 1 至 10 之间", 'error');
         return;
     }
 
@@ -526,7 +562,6 @@ async function saveConfig() {
         if (res.success) {
             showToast("系统配置保存并应用成功", 'success');
             closeModal();
-            fetchStatus();
         } else {
             showToast(res.message, 'error');
         }
@@ -644,11 +679,8 @@ async function loadHardwareOptions() {
 
 // ====================== 事件绑定与生命周期 ======================
 document.addEventListener('DOMContentLoaded', () => {
-    // 首次拉取数据
-    fetchStatus();
-
-    // 设置 3 秒定时轮询状态
-    setInterval(fetchStatus, 3000);
+    // 建立 WebSocket 订阅
+    connectWebSocket();
 
     // 按钮动作监听
     btnModeAuto.addEventListener('click', () => setMode('auto'));
@@ -656,7 +688,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     btnFanOpen.addEventListener('click', () => controlFan(true));
     btnFanClose.addEventListener('click', () => controlFan(false));
-    btnFanQuery.addEventListener('click', queryHardwareState);
 
     // 弹窗相关事件监听
     btnOpenConfig.addEventListener('click', openModal);

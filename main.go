@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/tarm/serial"
 )
 
@@ -95,25 +96,188 @@ func toHexBytesStr(b []byte) string {
 	return strings.Join(parts, "")
 }
 
+// WebSocket Hub，管理所有连接和广播
+type Hub struct {
+	clients    map[*websocket.Conn]bool
+	broadcast  chan []byte
+	register   chan *websocket.Conn
+	unregister chan *websocket.Conn
+	mu         sync.Mutex
+}
 
+var globalHub = &Hub{
+	clients:    make(map[*websocket.Conn]bool),
+	broadcast:  make(chan []byte, 10),
+	register:   make(chan *websocket.Conn),
+	unregister: make(chan *websocket.Conn),
+}
+
+func (h *Hub) run() {
+	for {
+		select {
+		case client := <-h.register:
+			h.mu.Lock()
+			h.clients[client] = true
+			h.mu.Unlock()
+			sendCurrentStatus(client)
+		case client := <-h.unregister:
+			h.mu.Lock()
+			if _, ok := h.clients[client]; ok {
+				delete(h.clients, client)
+				_ = client.Close()
+			}
+			h.mu.Unlock()
+		case message := <-h.broadcast:
+			h.mu.Lock()
+			for client := range h.clients {
+				err := client.WriteMessage(websocket.TextMessage, message)
+				if err != nil {
+					_ = client.Close()
+					delete(h.clients, client)
+				}
+			}
+			h.mu.Unlock()
+		}
+	}
+}
+
+// 广播最新的温控状态
+func broadcastStatus() {
+	t := getTemp()
+	mu.Lock()
+	stateCopy := fanState
+	serialExists := fileExists(serialPort)
+	tempExists := customTempPath == "" || (activeTempPath != "" && fileExists(activeTempPath))
+	overCount := overCeilingCount
+	underCount := underFloorCount
+	res := StatusResponse{
+		Temp:             t,
+		RelayState:       &stateCopy,
+		Mode:             controlMode,
+		Ceiling:          thresholdCeiling,
+		Floor:            thresholdFloor,
+		MinRunTime:       minRunTime,
+		FilterWindow:     filterWindow,
+		SerialPort:       serialPort,
+		BaudRate:         baudRate,
+		PollInterval:     pollInterval,
+		TempPath:         customTempPath,
+		HasFeedback:      hasFeedback,
+		OpCloseNoFeed:    toHexBytesStr(opCloseNoFeed),
+		OpOpenNoFeed:     toHexBytesStr(opOpenNoFeed),
+		OpCloseFeed:      toHexBytesStr(opCloseFeed),
+		OpOpenFeed:       toHexBytesStr(opOpenFeed),
+		OpToggleFeed:     toHexBytesStr(opToggleFeed),
+		OpQuery:          toHexBytesStr(opQuery),
+		StatusOn:         toHexBytesStr(statusOn),
+		StatusOff:        toHexBytesStr(statusOff),
+		HardwareName:     activeHwName,
+		HardwareType:     activeHwType,
+		SerialPortExists: serialExists,
+		TempPathExists:   tempExists,
+		OverCeilingCount: overCount,
+		UnderFloorCount:  underCount,
+	}
+	mu.Unlock()
+
+	data, err := json.Marshal(res)
+	if err == nil {
+		globalHub.broadcast <- data
+	}
+}
+
+// 新客户端连接时，推送当前状态数据
+func sendCurrentStatus(client *websocket.Conn) {
+	t := getTemp()
+	mu.Lock()
+	stateCopy := fanState
+	serialExists := fileExists(serialPort)
+	tempExists := customTempPath == "" || (activeTempPath != "" && fileExists(activeTempPath))
+	overCount := overCeilingCount
+	underCount := underFloorCount
+	res := StatusResponse{
+		Temp:             t,
+		RelayState:       &stateCopy,
+		Mode:             controlMode,
+		Ceiling:          thresholdCeiling,
+		Floor:            thresholdFloor,
+		MinRunTime:       minRunTime,
+		FilterWindow:     filterWindow,
+		SerialPort:       serialPort,
+		BaudRate:         baudRate,
+		PollInterval:     pollInterval,
+		TempPath:         customTempPath,
+		HasFeedback:      hasFeedback,
+		OpCloseNoFeed:    toHexBytesStr(opCloseNoFeed),
+		OpOpenNoFeed:     toHexBytesStr(opOpenNoFeed),
+		OpCloseFeed:      toHexBytesStr(opCloseFeed),
+		OpOpenFeed:       toHexBytesStr(opOpenFeed),
+		OpToggleFeed:     toHexBytesStr(opToggleFeed),
+		OpQuery:          toHexBytesStr(opQuery),
+		StatusOn:         toHexBytesStr(statusOn),
+		StatusOff:        toHexBytesStr(statusOff),
+		HardwareName:     activeHwName,
+		HardwareType:     activeHwType,
+		SerialPortExists: serialExists,
+		TempPathExists:   tempExists,
+		OverCeilingCount: overCount,
+		UnderFloorCount:  underCount,
+	}
+	mu.Unlock()
+
+	data, err := json.Marshal(res)
+	if err == nil {
+		_ = client.WriteMessage(websocket.TextMessage, data)
+	}
+}
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+func handleWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		writeLog(fmt.Sprintf("WebSocket 升级失败: %v", err))
+		return
+	}
+	globalHub.register <- conn
+
+	go func() {
+		defer func() {
+			globalHub.unregister <- conn
+		}()
+		for {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+		}
+	}()
+}
 
 var (
 	ser              *serial.Port
 	fanState         bool
 	controlMode      = "auto"
-	lastRelayHwState *bool
 	lastTurnOnTime   time.Time
-	tempHistory      []float64
 	mu               sync.Mutex
 	serialMu         sync.Mutex
 	activeHwName     string
 	activeHwType     string
 
-	isConnecting     bool
-	connMu           sync.Mutex
+	overCeilingCount int
+	underFloorCount  int
 
-	serialSkipUntil time.Time
-	serialBackoff   = time.Second
+	isConnecting bool
+	connMu       sync.Mutex
+
+	serialSkipUntil  time.Time
+	serialBackoff    = time.Second
 	maxSerialBackoff = 60 * time.Second
 )
 
@@ -257,7 +421,6 @@ func setFan(state bool) bool {
 		mu.Lock()
 		if fanState != state {
 			fanState = state
-			tempHistory = nil
 			if state {
 				lastTurnOnTime = time.Now()
 			}
@@ -281,7 +444,6 @@ func setFan(state bool) bool {
 		mu.Lock()
 		if fanState != state {
 			fanState = state
-			tempHistory = nil
 			if state {
 				lastTurnOnTime = time.Now()
 			}
@@ -352,14 +514,12 @@ func getHardwareRelayState() *bool {
 	if bytes.Contains(actualResp, stOn) {
 		res := true
 		mu.Lock()
-		lastRelayHwState = &res
 		fanState = true
 		mu.Unlock()
 		return &res
 	} else if bytes.Contains(actualResp, stOff) {
 		res := false
 		mu.Lock()
-		lastRelayHwState = &res
 		fanState = false
 		mu.Unlock()
 		return &res
@@ -615,7 +775,7 @@ func persistCurrentConfig() {
 
 func autoTempLoop() {
 	_ = initSerial()
-	
+
 	// 查询硬件初始状态
 	initialState := false
 	relaySt := getHardwareRelayState()
@@ -625,6 +785,9 @@ func autoTempLoop() {
 	_ = setFan(initialState)
 
 	writeLog("自动温控后台启动")
+
+	lastState := initialState
+
 	for {
 		mu.Lock()
 		mode := controlMode
@@ -634,6 +797,9 @@ func autoTempLoop() {
 		onTime := lastTurnOnTime
 		minRun := minRunTime
 		win := filterWindow
+		if win < 1 {
+			win = 1
+		}
 		hasFeed := hasFeedback
 		mu.Unlock()
 
@@ -645,41 +811,78 @@ func autoTempLoop() {
 			mu.Unlock()
 		}
 
+		// 状态变更时重置消抖计数器
+		if state != lastState {
+			mu.Lock()
+			overCeilingCount = 0
+			underFloorCount = 0
+			mu.Unlock()
+			lastState = state
+		}
+
 		if mode == "auto" {
 			tVal := getTemp()
 			if tVal != nil {
 				t := *tVal
 
+				// 过滤传感器异常读取噪声
+				if t < -10.0 || t > 100.0 {
+					continue
+				}
+
+				// 连续超温/低温消抖计数 (写全局变量，需加锁)
 				mu.Lock()
-				tempHistory = append(tempHistory, t)
-				if len(tempHistory) > win {
-					tempHistory = tempHistory[len(tempHistory)-win:]
+				if t >= ceiling {
+					overCeilingCount++
+				} else {
+					overCeilingCount = 0
 				}
-				sum := 0.0
-				for _, v := range tempHistory {
-					sum += v
+				if t <= floor {
+					underFloorCount++
+				} else {
+					underFloorCount = 0
 				}
-				tAvg := sum / float64(len(tempHistory))
+				overCount := overCeilingCount
+				underCount := underFloorCount
 				mu.Unlock()
 
-				if (tAvg >= ceiling || t >= ceiling+5.0) && !state {
-					reason := fmt.Sprintf("平均温度 %.2f℃ 超过上限 %.2f℃", tAvg, ceiling)
-					if t >= ceiling+5.0 && tAvg < ceiling {
-						reason = fmt.Sprintf("瞬时温度 %.2f℃ 触发紧急上限 (%.2f℃+5℃)", t, ceiling)
-					}
+				if overCount >= win && !state {
+					reason := fmt.Sprintf("温度已连续 %d 次超过上限 %.2f℃ (当前 %.2f℃)", win, ceiling, t)
 					writeLog(reason + "，自动开启继电器")
-					_ = setFan(true)
-				} else if tAvg <= floor && state {
+					if setFan(true) {
+						mu.Lock()
+						overCeilingCount = 0
+						underFloorCount = 0
+						mu.Unlock()
+						lastState = true
+					}
+				} else if underCount >= win && state {
 					elapsed := time.Since(onTime)
 					if elapsed >= time.Duration(minRun)*time.Second {
-						writeLog(fmt.Sprintf("平均温度 %.2f℃ 低于下限 %.2f℃，且已运行 %.1f 秒，自动关闭继电器", tAvg, floor, elapsed.Seconds()))
-						_ = setFan(false)
+						writeLog(fmt.Sprintf("温度已连续 %d 次低于下限 %.2f℃ (当前 %.2f℃)，且已运行 %.1f 秒，自动关闭继电器", win, floor, t, elapsed.Seconds()))
+						if setFan(false) {
+							mu.Lock()
+							overCeilingCount = 0
+							underFloorCount = 0
+							mu.Unlock()
+							lastState = false
+						}
 					} else {
-						writeLog(fmt.Sprintf("平均温度 %.2f℃ 已低于下限 %.2f℃，因未达到最小运行时间（%d 秒，已运行 %.1f 秒）保持开启", tAvg, floor, minRun, elapsed.Seconds()))
+						writeLog(fmt.Sprintf("温度已连续 %d 次低于下限 %.2f℃ (当前 %.2f℃)，因未达到最小运行时间（%d 秒，已运行 %.1f 秒）保持开启", win, floor, t, minRun, elapsed.Seconds()))
 					}
 				}
 			}
+		} else {
+			// 非自动模式重置消抖状态
+			mu.Lock()
+			overCeilingCount = 0
+			underFloorCount = 0
+			mu.Unlock()
 		}
+		
+		// 广播当前最新状态
+		broadcastStatus()
+
 		mu.Lock()
 		sleepSec := pollInterval
 		mu.Unlock()
@@ -715,6 +918,8 @@ type StatusResponse struct {
 	HardwareType     string   `json:"hardware_type"`
 	SerialPortExists bool     `json:"serial_port_exists"`
 	TempPathExists   bool     `json:"temp_path_exists"`
+	OverCeilingCount int      `json:"over_ceiling_count"`
+	UnderFloorCount  int      `json:"under_floor_count"`
 }
 
 type BasicResponse struct {
@@ -734,46 +939,6 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
-func handleStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, BasicResponse{Success: false, Message: "Method not allowed"})
-		return
-	}
-	t := getTemp()
-
-	mu.Lock()
-	stateCopy := fanState
-	serialExists := fileExists(serialPort)
-	tempExists := customTempPath == "" || (activeTempPath != "" && fileExists(activeTempPath))
-	res := StatusResponse{
-		Temp:             t,
-		RelayState:       &stateCopy,
-		Mode:             controlMode,
-		Ceiling:          thresholdCeiling,
-		Floor:            thresholdFloor,
-		MinRunTime:       minRunTime,
-		FilterWindow:     filterWindow,
-		SerialPort:       serialPort,
-		BaudRate:         baudRate,
-		PollInterval:     pollInterval,
-		TempPath:         customTempPath,
-		HasFeedback:      hasFeedback,
-		OpCloseNoFeed:    toHexBytesStr(opCloseNoFeed),
-		OpOpenNoFeed:     toHexBytesStr(opOpenNoFeed),
-		OpCloseFeed:      toHexBytesStr(opCloseFeed),
-		OpOpenFeed:       toHexBytesStr(opOpenFeed),
-		OpToggleFeed:     toHexBytesStr(opToggleFeed),
-		OpQuery:          toHexBytesStr(opQuery),
-		StatusOn:         toHexBytesStr(statusOn),
-		StatusOff:        toHexBytesStr(statusOff),
-		HardwareName:     activeHwName,
-		HardwareType:     activeHwType,
-		SerialPortExists: serialExists,
-		TempPathExists:   tempExists,
-	}
-	mu.Unlock()
-	writeJSON(w, http.StatusOK, res)
-}
 
 func handleOpen(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -785,6 +950,8 @@ func handleOpen(w http.ResponseWriter, r *http.Request) {
 	msg := "手动开启继电器成功"
 	if !res {
 		msg = "手动开启继电器失败"
+	} else {
+		broadcastStatus()
 	}
 	writeJSON(w, http.StatusOK, BasicResponse{Success: res, Message: msg})
 }
@@ -799,6 +966,8 @@ func handleClose(w http.ResponseWriter, r *http.Request) {
 	msg := "手动关闭继电器成功"
 	if !res {
 		msg = "手动关闭继电器失败"
+	} else {
+		broadcastStatus()
 	}
 	writeJSON(w, http.StatusOK, BasicResponse{Success: res, Message: msg})
 }
@@ -837,6 +1006,7 @@ func handleSetMode(w http.ResponseWriter, r *http.Request) {
 	if req.Mode == "auto" {
 		modeName = "自动温控"
 	}
+	broadcastStatus()
 	writeJSON(w, http.StatusOK, BasicResponse{Success: true, Message: fmt.Sprintf("成功切换控制模式为：%s", modeName)})
 }
 
@@ -880,7 +1050,7 @@ func handleSetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.FilterWindow < 1 || req.FilterWindow > 10 {
-		writeJSON(w, http.StatusOK, BasicResponse{Success: false, Message: "平滑窗口大小必须在1至10之间"})
+		writeJSON(w, http.StatusOK, BasicResponse{Success: false, Message: "消抖判定次数必须在1至10之间"})
 		return
 	}
 
@@ -948,12 +1118,11 @@ func handleSetConfig(w http.ResponseWriter, r *http.Request) {
 	statusOn = parsedStatusOn
 	statusOff = parsedStatusOff
 
-	tempHistory = nil
 	mu.Unlock()
 
 	persistCurrentConfig()
 
-	writeLog(fmt.Sprintf("API更新配置成功：上限 %.2f℃，下限 %.2f℃，防抖最少时间 %d秒，平滑窗口 %d次，串口 %s",
+	writeLog(fmt.Sprintf("API更新配置成功：上限 %.2f℃，下限 %.2f℃，防抖最少时间 %d秒，消抖次数 %d次，串口 %s",
 		req.Ceiling, req.Floor, req.MinRunTime, req.FilterWindow, req.SerialPort))
 
 	resetSerialBackoff() // 用户修改配置，先重置串口退避再触发重连
@@ -962,23 +1131,10 @@ func handleSetConfig(w http.ResponseWriter, r *http.Request) {
 		go initSerial()
 	}
 
+	broadcastStatus()
 	writeJSON(w, http.StatusOK, BasicResponse{Success: true, Message: "配置保存并应用成功"})
 }
 
-func handleQuery(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, BasicResponse{Success: false, Message: "Method not allowed"})
-		return
-	}
-	writeLog("API触发手动查询继电器状态")
-	relaySt := getHardwareRelayState()
-	success := (relaySt != nil)
-	msg := "查询成功"
-	if !success {
-		msg = "查询失败"
-	}
-	writeJSON(w, http.StatusOK, QueryResponse{Success: success, RelayState: relaySt, Message: msg})
-}
 
 type TempSensorInfo struct {
 	Path         string  `json:"path"`
@@ -1290,14 +1446,13 @@ func startWebServer() {
 	prefix := gatewayPrefix
 
 	apiRoutes := map[string]http.HandlerFunc{
-		"/api/status":            handleStatus,
 		"/api/open":              handleOpen,
 		"/api/close":             handleClose,
 		"/api/set_mode":          handleSetMode,
 		"/api/set_config":        handleSetConfig,
-		"/api/query":             handleQuery,
 		"/api/list_temp_sensors": handleListTempSensors,
 		"/api/list_serial_ports": handleListSerialPorts,
+		"/api/ws":                handleWS,
 	}
 	for path, handler := range apiRoutes {
 		mux.HandleFunc(path, handler)
@@ -1353,6 +1508,7 @@ func startWebServer() {
 func main() {
 	initPaths()
 	loadConfig()
+	go globalHub.run()
 	go autoTempLoop()
 	startWebServer()
 }
